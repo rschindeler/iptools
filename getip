@@ -1,4 +1,6 @@
 #!/bin/bash
+# Tool to do a simple public IP lookup using duckduckgo
+# Requires: xmllint
 
 # Query IP from duckduckgo
 url="https://duckduckgo.com/?q=what+is+my+ip&t=canonical&ia=answer"
@@ -8,20 +10,6 @@ html=$(curl --max-time 5 -L "${url}" 2>/dev/null)
 #   - extract the text
 script_section=$(echo ${html} | xmllint --html --xpath "//html/body/script/text()" - 2>/dev/null)
 
-#echo $script_section
-#echo
-#exit
-
-
 # The answer will have the following form: 'Your IP address in XXX in <a herf=...>XXX"
 echo $script_section | sed -r 's/.*"Your IP address is ([0-9\.]*) in <a.*>([^"]*)".*/\1\n\2/'
 
-# The script section is a comma-separated list of key-value pairs such as:
-#   "AnswerType":"ip","dev_date":null
-#
-# Use sed to split key-value pairs by the ',"' pattern then select 
-# the line that contains the 'Answer' key
-#answer=$(echo ${script_section} | sed 's/,"/\n/g' | grep 'Answer":"')
-# Remove the hyperlink and display
-#echo $answer | sed -r 's/.*Answer":"(.*)<.*>(.*)"/\1\2/'
-#echo
