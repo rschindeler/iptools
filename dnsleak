@@ -1,0 +1,185 @@
+#!/bin/bash
+# Scritp to get Public IP and Public DNS information from the command line. 
+# This can be used to verify that your VPN is running correctly and to check for DNS leaks
+#
+# This script uses two 3rd party programs to get information about IP addresses:
+#   1) whois
+#       - Install: apt-get install whois
+#       - Provides detailed information such as address, province, postal code, company name
+#   2) geoiplookup
+#       - Install: apt-get install geoip-bin 
+#       - Only provides country information
+#       - Seems to be more accurate / up-to-date than whois
+#
+# Information retreived from these two sources are combined to ensure the results are accurate.
+# The following information will be displayed (where available)
+#   - Organization
+#   - Address
+#   - City
+#   - State / Province
+#   - Postal Code
+#   - Country
+
+##################################################################################
+# Functions
+##################################################################################
+
+# Function to look through lines of text for specific keywords and extract the values
+# Key/value pairs can be in the following forms:
+#  keyword:   value
+#  text:keyword:text:value
+#  text:keyword:text:     value
+#
+function keyword_lookup {
+    text=$1
+    # Loop through each keqyword in the text
+    for keyword in ${@:2}; do
+        # Do a case-insensitive grep 
+        result=$(echo "$text" | grep -i "${keyword}:" )
+        # Check to see if there was a match
+        if [ ! -z "$result" ]; then
+            # Extract the value for this line and echo it
+            echo "$result" | while read line; do
+                echo "$line" | tr ':' '\n' | tail -n 1
+            done
+            break
+        fi
+    done
+}
+
+
+# Function to get common whois information from an IP using the whois command
+# The whois command returns data in multiple formats
+function get_whois {
+    ip=$1
+    >&2 echo "Getting Whois Information for IP: $ip"
+
+    # Get the whois information for this IP
+    whois_result=$(whois $ip 2>/dev/null)
+
+    # Look for the following information using keywords
+    declare -A fields
+    fields['Organization']=$(keyword_lookup "$whois_result" organization orgname company netname | sort -u)
+    fields['Address']=$(keyword_lookup "$whois_result" address street | sort -u)
+    fields['City']=$(keyword_lookup "$whois_result" city | sort -u)
+    fields['State/Province']=$(keyword_lookup "$whois_result" state province stateprov | sort -u)
+    fields['Postal']=$(keyword_lookup "$whois_result" postal postalcode | sort -u)
+    fields['Country']=$(keyword_lookup "$whois_result" country | sort -u)
+    
+    # Print anything that was found
+    out_str=""
+    for key in ${!fields[@]}; do
+        if [ ! -z "${fields[$key]}" ]; then
+            echo ${key}: ${fields[$key]}
+        fi
+    done
+
+}
+
+# Function to get Country information for an IP using the geoiplookup command
+    function get_geoip {
+    ip=$1
+    >&2 echo "Getting GeoIP Information for IP: $ip"
+
+    # Query the country and extract the field
+    # Make sure it does not return 'IP Address not found'
+    result=$(geoiplookup $ip | cut -d':' -f2 | sed 's/^[ ]*//' | grep -v 'IP Address not found')
+
+    # Check to see if a result was found, if so, echo with the 'Country' key
+    if [ ! -z "$result" ]; then
+        echo Country: $result
+    fi
+}
+
+
+# Function to combine the information from geoiplookup and whois
+#  - information from geoiplookup is more accurate but less detailed
+function combine_info {
+    info_geoip="$1"
+    info_whois="$2"
+
+    # Get the country code from both
+    #   - geoip: will be in the form XX, CCCCCCCC
+    geoip_country_code=$(echo "$info_geoip" | grep 'Country' | cut -d':' -f2 | cut -d, -f1 | tr -d ' ')
+    #   - whois: only reports short form
+    whois_country_code=$(echo "$info_whois" | grep 'Country' | cut -d':' -f2 | tr -d ' ')
+
+    # If the codes match, use both. If not, just use geoip
+    if [ "$geoip_country_code" == "$whois_country_code" ]; then
+        # Print everything except Country from whois
+        echo "$info_whois" | grep -v Country
+        # Print Country from geoip
+        echo "$info_geoip"
+    else
+        # Print Country from geoip
+        echo "$info_geoip"
+    fi
+}
+
+##################################################################################
+# Main Script
+##################################################################################
+
+# Uset myip.opendns.com to get public ip
+public_ip=$(dig +short myip.opendns.com @resolver1.opendns.com)
+
+# Get the local DNS configuration from /etc/resolv.conf
+local_dns=$(cat /etc/resolv.conf | grep nameserver | cut -d ' ' -f 2)
+
+# Use akahelp.net to get the name of the (externally visible) DNS server
+public_dns=$(dig +short TXT whoami.ipv4.akahelp.net | grep ns | sed -r 's/"ns" "([^"]*)"/\1/g')
+
+# Get whois and geoiplookup information if they are installed
+# Check to see if whois installed
+if [ ! -z `which whois` ]; then
+    public_ip_whois=$(get_whois $public_ip)
+    public_dns_whois=$(get_whois $public_dns)
+else
+    echo "Install whois for more information"
+    echo sudo apt-get install whois
+fi
+
+
+# Check to see if geoiplookup is installed
+if [ ! -z `which geoiplookup` ]; then
+    public_ip_geoip=$(get_geoip $public_ip)
+    public_dns_geoip=$(get_geoip $public_dns)
+else
+    echo "Install GeoIP Lookup for more information"
+    echo sudo apt-get install geoip-bin
+fi
+
+
+# Combine information 
+#   - Check to see if either query did not return a result
+#   - GeoIP country information is more accurate
+# a) Public IP
+if [ ! -z "$public_ip_whois" ] && [ -z "$public_ip_geoip" ]; then
+    echo Using whois for Public IP
+    public_ip_loc="$public_ip_whois"
+elif [ -z "$public_ip_whois" ] && [ ! -z "$public_ip_geoip" ]; then
+    echo Using geoip for Public IP
+    public_ip_loc="$public_ip_geoip"
+else
+    echo Using combined geoip and whois for Public IP
+    public_ip_loc=$(combine_info "$public_ip_geoip" "$public_ip_whois")
+fi
+# b) Public DNS
+if [ ! -z "$public_dns_whois" ] && [ -z "$public_dns_geoip" ]; then
+    echo Using whois for Public DNS
+    public_dns_loc="$public_dns_whois"
+elif [ -z "$public_dns_whois" ] && [ ! -z "$public_dns_geoip" ]; then
+    echo Using geoip for Public DNS
+    public_dns_loc="$public_dns_geoip"
+else
+    echo Using combined geoip and whois for Public DNS
+    public_dns_loc=$(combine_info "$public_dns_geoip" "$public_dns_whois")
+fi
+
+
+# Display information
+echo "Public IP: $public_ip"
+echo "$public_ip_loc" | sed -r 's/(.*)/\t\1/g'
+echo "Local DNS Server (/etc/resolv.conf): $local_dns"
+echo "Public DNS Server: $public_dns"
+echo "$public_dns_loc" | sed -r 's/(.*)/\t\1/g'
